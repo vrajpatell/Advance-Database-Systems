@@ -7,10 +7,10 @@ import datetime
 app = Flask(__name__)
 port = int(os.getenv("PORT", 5000))
 
-server = 'vhpserver.database.windows.net'
-database = 'vhpdatabase'
-username = 'vrajpatell'
-password = 'Vraj0712.'
+server = 'Server Name'
+database = 'database name'
+username = 'user name'
+password = 'password'
 driver= '{ODBC Driver 17 for SQL Server}'
 
 cnxn = pyodbc.connect('DRIVER='+driver+';SERVER='+server+';PORT=1443;DATABASE='+database+';UID='+username+';PWD='+ password)
