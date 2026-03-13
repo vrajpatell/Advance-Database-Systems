@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: advance-db-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app --bind 0.0.0.0:$PORT
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_PATH
+        value: /opt/render/project/src/data/earthquakes.db
+      - key: SOURCE_CSV
+        value: all_month.csv
+
+  - type: web
+    name: advance-db-dashboard
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt -r dashboard/requirements.txt
+    startCommand: streamlit run dashboard/dashboard.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: DATABASE_PATH
+        value: /opt/render/project/src/data/earthquakes.db
