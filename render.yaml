@@ -10,7 +10,7 @@ services:
       - key: APP_ENV
         value: production
       - key: DATABASE_PATH
-        value: /opt/render/project/src/data/earthquakes.db
+        value: /tmp/advance-db/earthquakes.db
       - key: SOURCE_CSV
         value: all_month.csv
 
@@ -22,4 +22,4 @@ services:
     startCommand: streamlit run dashboard/dashboard.py --server.port $PORT --server.address 0.0.0.0
     envVars:
       - key: DATABASE_PATH
-        value: /opt/render/project/src/data/earthquakes.db
+        value: /tmp/advance-db/earthquakes.db
