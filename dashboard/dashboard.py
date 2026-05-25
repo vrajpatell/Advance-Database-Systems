@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -47,10 +48,21 @@ def _rows_df(payload: dict[str, Any]) -> pd.DataFrame:
 
 
 def _safe_call(callable_obj):
+    start = time.perf_counter()
     try:
-        return callable_obj(), None
+        payload = callable_obj()
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 1)
+        return payload, {"ok": True, "elapsed_ms": elapsed_ms}
     except requests.RequestException as exc:
-        return None, str(exc)
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 1)
+        response = getattr(exc, "response", None)
+        status_code = response.status_code if response is not None else None
+        return None, {
+            "ok": False,
+            "elapsed_ms": elapsed_ms,
+            "status_code": status_code,
+            "error": str(exc),
+        }
 
 
 def main() -> None:
@@ -101,18 +113,35 @@ def main() -> None:
     }
 
     responses: dict[str, dict[str, Any]] = {}
-    failures: dict[str, str] = {}
+    failures: dict[str, dict[str, Any]] = {}
+    diagnostics: dict[str, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=min(8, len(requests_map))) as pool:
         future_map = {name: pool.submit(_safe_call, fn) for name, fn in requests_map.items()}
         for name, fut in future_map.items():
-            payload, error = fut.result()
-            if error:
-                failures[name] = error
+            payload, meta = fut.result()
+            diagnostics[name] = meta
+            if not meta.get("ok"):
+                failures[name] = meta
             else:
                 responses[name] = payload or {}
 
     if failures:
         st.warning(f"Some API calls failed ({len(failures)}/{len(requests_map)}). Showing partial results.")
+
+    with st.expander("Monitoring logs (lightweight)"):
+        diagnostic_rows = []
+        for endpoint_name in requests_map:
+            info = diagnostics.get(endpoint_name, {})
+            diagnostic_rows.append(
+                {
+                    "endpoint": endpoint_name,
+                    "status": "ok" if info.get("ok") else "failed",
+                    "http_status": info.get("status_code"),
+                    "latency_ms": info.get("elapsed_ms"),
+                    "error": info.get("error"),
+                }
+            )
+        st.dataframe(pd.DataFrame(diagnostic_rows), use_container_width=True)
 
     if "health" not in responses:
         st.error(f"Could not connect to API {API_BASE_URL}.")

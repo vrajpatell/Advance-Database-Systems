@@ -281,16 +281,26 @@ def _dbscan_labels(coords: np.ndarray, eps: float, min_samples: int) -> np.ndarr
     visited = np.zeros(n_points, dtype=bool)
     cluster_id = 0
 
-    # Build a neighborhood index once using vectorized pairwise distances.
-    diff = coords[:, None, :] - coords[None, :, :]
-    dist_matrix = np.sqrt(np.sum(diff * diff, axis=2))
-    neighbors = [np.flatnonzero(dist_matrix[i] <= eps).tolist() for i in range(n_points)]
+    # Avoid allocating a full O(n^2) distance matrix, which can exhaust memory
+    # in production (e.g., >10k points). Compute neighborhoods on demand and cache.
+    neighbors_cache: dict[int, list[int]] = {}
+
+    def neighbors_for(i: int) -> list[int]:
+        cached = neighbors_cache.get(i)
+        if cached is not None:
+            return cached
+
+        delta = coords - coords[i]
+        distances = np.sqrt(np.sum(delta * delta, axis=1))
+        points = np.flatnonzero(distances <= eps).tolist()
+        neighbors_cache[i] = points
+        return points
 
     for i in range(n_points):
         if visited[i]:
             continue
         visited[i] = True
-        point_neighbors = neighbors[i]
+        point_neighbors = neighbors_for(i)
         if len(point_neighbors) < min_samples:
             labels[i] = -1
             continue
@@ -303,7 +313,7 @@ def _dbscan_labels(coords: np.ndarray, eps: float, min_samples: int) -> np.ndarr
             j = seeds.pop()
             if not visited[j]:
                 visited[j] = True
-                j_neighbors = neighbors[j]
+                j_neighbors = neighbors_for(j)
                 if len(j_neighbors) >= min_samples:
                     seeds.update(j_neighbors)
             if labels[j] in (-99, -1):
