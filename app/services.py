@@ -4,6 +4,9 @@ import datetime as dt
 import math
 from typing import Any
 
+import numpy as np
+import pandas as pd
+
 from .db import get_connection
 
 
@@ -104,6 +107,128 @@ def clustering(lat1: float, lon1: float, lat2: float, lon2: float, step: float) 
     return {"cells": cells, "total_cells": len(cells)}
 
 
+def detect_anomalies(zscore_threshold: float = 2.5) -> dict[str, Any]:
+    if zscore_threshold <= 0:
+        raise ValueError("zscore_threshold must be positive")
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT event_date, event_time, latitude, longitude, depth, magnitude, place
+            FROM earthquakes
+            ORDER BY event_date, event_time;
+            """
+        ).fetchall()
+
+    if not rows:
+        return {"count": 0, "threshold": zscore_threshold, "rows": []}
+
+    frame = pd.DataFrame([dict(row) for row in rows])
+    frame["magnitude"] = pd.to_numeric(frame["magnitude"], errors="coerce")
+    frame = frame.dropna(subset=["magnitude"]).copy()
+    if frame.empty:
+        return {"count": 0, "threshold": zscore_threshold, "rows": []}
+
+    frame["zscore"] = (frame["magnitude"] - frame["magnitude"].mean()) / frame["magnitude"].std(ddof=0)
+    frame["zscore"] = frame["zscore"].abs()
+    frame = frame[frame["zscore"] >= zscore_threshold].copy()
+
+    anomalies: list[dict[str, Any]] = []
+    for record in frame.to_dict(orient="records"):
+        record["zscore"] = round(float(record["zscore"]), 3)
+        anomalies.append(record)
+
+    return {"count": len(anomalies), "threshold": zscore_threshold, "rows": anomalies}
+
+
+def predictive_earthquake_model(days_ahead: int = 7) -> dict[str, Any]:
+    if days_ahead <= 0:
+        raise ValueError("days_ahead must be positive")
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT event_date, magnitude FROM earthquakes ORDER BY event_date;"
+        ).fetchall()
+
+    frame = pd.DataFrame([dict(row) for row in rows])
+    if frame.empty:
+        return {"days_ahead": days_ahead, "predictions": []}
+    frame["event_date"] = pd.to_datetime(frame["event_date"], format="%m/%d/%Y", errors="coerce")
+    frame = frame.dropna(subset=["event_date"])
+    daily_series = frame.groupby(frame["event_date"].dt.date).size().sort_index()
+    daily_counts = daily_series.to_dict()
+
+    if len(daily_counts) < 2:
+        return {"days_ahead": days_ahead, "predictions": []}
+
+    sorted_days = sorted(daily_counts.items(), key=lambda x: x[0])
+    day0 = sorted_days[0][0]
+    x = np.array([(d - day0).days for d, _ in sorted_days], dtype=float).reshape(-1, 1)
+    y = np.array([count for _, count in sorted_days], dtype=float)
+
+    slope, intercept = np.polyfit(x.flatten(), y, 1)
+
+    last_day = sorted_days[-1][0]
+    predictions: list[dict[str, Any]] = []
+    for offset in range(1, days_ahead + 1):
+        future_day = last_day + dt.timedelta(days=offset)
+        future_x = np.array([[(future_day - day0).days]], dtype=float)
+        predicted_count = max(0.0, float(slope * future_x[0][0] + intercept))
+        predictions.append(
+            {
+                "date": future_day.isoformat(),
+                "predicted_earthquakes": round(predicted_count, 3),
+            }
+        )
+
+    return {
+        "days_ahead": days_ahead,
+        "model": "NumPyLinearRegression",
+        "predictions": predictions,
+    }
+
+
+def ml_clustering(eps: float = 0.5, min_samples: int = 5) -> dict[str, Any]:
+    if eps <= 0:
+        raise ValueError("eps must be positive")
+    if min_samples <= 0:
+        raise ValueError("min_samples must be positive")
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT event_date, event_time, latitude, longitude, depth, magnitude, place FROM earthquakes;"
+        ).fetchall()
+
+    if not rows:
+        return {"clusters": [], "noise_points": 0, "total_points": 0}
+
+    coords = np.array([[row["latitude"], row["longitude"]] for row in rows], dtype=float)
+    labels = _dbscan_labels(coords, eps=eps, min_samples=min_samples)
+
+    clustered_rows: list[dict[str, Any]] = []
+    for row, label in zip(rows, labels):
+        item = dict(row)
+        item["cluster_id"] = int(label)
+        clustered_rows.append(item)
+
+    cluster_summary: dict[int, int] = {}
+    for label in labels:
+        cluster_summary[int(label)] = cluster_summary.get(int(label), 0) + 1
+
+    clusters = [
+        {"cluster_id": cluster_id, "count": count}
+        for cluster_id, count in sorted(cluster_summary.items(), key=lambda x: x[0])
+    ]
+    noise_points = cluster_summary.get(-1, 0)
+
+    return {
+        "clusters": clusters,
+        "noise_points": noise_points,
+        "total_points": len(rows),
+        "rows": clustered_rows,
+    }
+
+
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     radius_km = 6371.0
     d_lat = math.radians(lat2 - lat1)
@@ -114,3 +239,42 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     )
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return radius_km * c
+
+
+def _dbscan_labels(coords: np.ndarray, eps: float, min_samples: int) -> np.ndarray:
+    n_points = len(coords)
+    labels = np.full(n_points, -99, dtype=int)
+    visited = np.zeros(n_points, dtype=bool)
+    cluster_id = 0
+
+    def region_query(i: int) -> list[int]:
+        dists = np.linalg.norm(coords - coords[i], axis=1)
+        return [idx for idx, d in enumerate(dists) if d <= eps]
+
+    for i in range(n_points):
+        if visited[i]:
+            continue
+        visited[i] = True
+        neighbors = region_query(i)
+        if len(neighbors) < min_samples:
+            labels[i] = -1
+            continue
+
+        labels[i] = cluster_id
+        seeds = set(neighbors)
+        seeds.discard(i)
+
+        while seeds:
+            j = seeds.pop()
+            if not visited[j]:
+                visited[j] = True
+                j_neighbors = region_query(j)
+                if len(j_neighbors) >= min_samples:
+                    seeds.update(j_neighbors)
+            if labels[j] in (-99, -1):
+                labels[j] = cluster_id
+
+        cluster_id += 1
+
+    labels[labels == -99] = -1
+    return labels
