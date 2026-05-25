@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pandas as pd
@@ -45,6 +46,13 @@ def _rows_df(payload: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
+def _safe_call(callable_obj):
+    try:
+        return callable_obj(), None
+    except requests.RequestException as exc:
+        return None, str(exc)
+
+
 def main() -> None:
     st.set_page_config(page_title="Earthquake Analytics Dashboard", layout="wide")
     st.title("Advance Database Systems — Analytics Dashboard")
@@ -66,10 +74,10 @@ def main() -> None:
     eps = st.sidebar.slider("DBSCAN eps", 0.1, 5.0, 0.5, 0.1)
     min_samples = st.sidebar.slider("DBSCAN min_samples", 2, 30, 5)
 
-    try:
-        health = _get("/health")
-        count_payload = _post("/analytics/count-by-magnitude", {"min_magnitude": min_mag})
-        range_payload = _post(
+    requests_map = {
+        "health": lambda: _get("/health"),
+        "count": lambda: _post("/analytics/count-by-magnitude", {"min_magnitude": min_mag}),
+        "range": lambda: _post(
             "/analytics/range",
             {
                 "lower_mag": min_mag,
@@ -77,29 +85,51 @@ def main() -> None:
                 "start_date": pd.Timestamp(start_date).strftime("%m/%d/%Y"),
                 "end_date": pd.Timestamp(end_date).strftime("%m/%d/%Y"),
             },
-        )
-        distance_payload = _post(
+        ),
+        "distance": lambda: _post(
             "/analytics/distance",
             {"latitude": center_lat, "longitude": center_lon, "distance_km": radius_km},
-        )
-        day_night_payload = _post("/analytics/day-night", {"min_magnitude": min_mag})
-        clustering_payload = _post(
+        ),
+        "day_night": lambda: _post("/analytics/day-night", {"min_magnitude": min_mag}),
+        "clustering": lambda: _post(
             "/analytics/clustering",
             {"lat1": 60.0, "lon1": -180.0, "lat2": -60.0, "lon2": 180.0, "step": 20.0},
-        )
-        anomaly_payload = _post(
-            "/analytics/anomaly-detection", {"zscore_threshold": zscore_threshold}
-        )
-        pred_payload = _post("/analytics/predictive-earthquake", {"days_ahead": days_ahead})
-        ml_cluster_payload = _post(
-            "/analytics/ml-clustering", {"eps": eps, "min_samples": min_samples}
-        )
-    except requests.RequestException as exc:
-        st.error(f"Could not fetch data from API {API_BASE_URL}: {exc}")
+        ),
+        "anomaly": lambda: _post("/analytics/anomaly-detection", {"zscore_threshold": zscore_threshold}),
+        "predictive": lambda: _post("/analytics/predictive-earthquake", {"days_ahead": days_ahead}),
+        "ml": lambda: _post("/analytics/ml-clustering", {"eps": eps, "min_samples": min_samples}),
+    }
+
+    responses: dict[str, dict[str, Any]] = {}
+    failures: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(requests_map))) as pool:
+        future_map = {name: pool.submit(_safe_call, fn) for name, fn in requests_map.items()}
+        for name, fut in future_map.items():
+            payload, error = fut.result()
+            if error:
+                failures[name] = error
+            else:
+                responses[name] = payload or {}
+
+    if failures:
+        st.warning(f"Some API calls failed ({len(failures)}/{len(requests_map)}). Showing partial results.")
+
+    if "health" not in responses:
+        st.error(f"Could not connect to API {API_BASE_URL}.")
         local_data = load_local_data()
         if not local_data.empty:
             st.info("Local SQLite data found, but dashboard requires API for endpoint analytics.")
         return
+
+    health = responses.get("health", {})
+    count_payload = responses.get("count", {})
+    range_payload = responses.get("range", {})
+    distance_payload = responses.get("distance", {})
+    day_night_payload = responses.get("day_night", {})
+    clustering_payload = responses.get("clustering", {})
+    anomaly_payload = responses.get("anomaly", {})
+    pred_payload = responses.get("predictive", {})
+    ml_cluster_payload = responses.get("ml", {})
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("API Health", health.get("status", "unknown").upper())
