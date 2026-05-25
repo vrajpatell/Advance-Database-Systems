@@ -19,6 +19,9 @@ def index():
                 "/analytics/distance",
                 "/analytics/day-night",
                 "/analytics/clustering",
+                "/analytics/anomaly-detection",
+                "/analytics/predictive-earthquake",
+                "/analytics/ml-clustering",
             ],
         }
     )
@@ -80,3 +83,25 @@ def clustering_query():
             float(payload["step"]),
         )
     )
+
+
+@bp.post("/analytics/anomaly-detection")
+def anomaly_detection_query():
+    payload = request.get_json(silent=True) or {}
+    threshold = float(payload.get("zscore_threshold", 2.5))
+    return jsonify(services.detect_anomalies(threshold))
+
+
+@bp.post("/analytics/predictive-earthquake")
+def predictive_earthquake_query():
+    payload = request.get_json(silent=True) or {}
+    days_ahead = int(payload.get("days_ahead", 7))
+    return jsonify(services.predictive_earthquake_model(days_ahead))
+
+
+@bp.post("/analytics/ml-clustering")
+def ml_clustering_query():
+    payload = request.get_json(silent=True) or {}
+    eps = float(payload.get("eps", 0.5))
+    min_samples = int(payload.get("min_samples", 5))
+    return jsonify(services.ml_clustering(eps=eps, min_samples=min_samples))
