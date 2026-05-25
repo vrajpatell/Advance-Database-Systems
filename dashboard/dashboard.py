@@ -6,18 +6,48 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 
 DB_PATH = Path(os.getenv("DATABASE_PATH", "data/earthquakes.db"))
+API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
+
+
+def _load_data_from_api(min_magnitude: float = 0.0) -> pd.DataFrame:
+    if not API_BASE_URL:
+        return pd.DataFrame()
+
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/analytics/count-by-magnitude",
+            json={"min_magnitude": min_magnitude},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException:
+        return pd.DataFrame()
+
+    rows = payload.get("rows", []) if isinstance(payload, dict) else []
+    if not rows:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(rows)
+    if "magnitude" in frame.columns:
+        frame["magnitude"] = pd.to_numeric(frame["magnitude"], errors="coerce")
+    return frame
 
 
 @st.cache_data
 def load_data() -> pd.DataFrame:
     if not DB_PATH.exists():
-        return pd.DataFrame()
+        return _load_data_from_api()
     conn = sqlite3.connect(DB_PATH)
     try:
-        return pd.read_sql_query("SELECT * FROM earthquakes", conn)
+        frame = pd.read_sql_query("SELECT * FROM earthquakes", conn)
+        if frame.empty:
+            return _load_data_from_api()
+        return frame
     finally:
         conn.close()
 
@@ -28,7 +58,10 @@ def main() -> None:
 
     data = load_data()
     if data.empty:
-        st.warning("No data found. Run the API once to initialize the database.")
+        st.warning(
+            "No data found from either local SQLite or API. "
+            "Set API_BASE_URL in dashboard environment (for Render: https://advance-db-api.onrender.com)."
+        )
         return
 
     col1, col2, col3 = st.columns(3)
