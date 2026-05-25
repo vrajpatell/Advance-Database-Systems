@@ -41,6 +41,7 @@ Advance Database Systems is an earthquake analytics platform that ingests seismi
   - Z-score based anomaly detection on magnitude values
   - Predictive earthquake occurrence modeling using linear regression
   - ML-based spatial clustering using DBSCAN
+  - Pandas-powered anomaly detection and preprocessing for forecasting
 - Automatic CSV-to-database bootstrapping
 - Performance indexes for common query filters
 - Streamlit monitoring dashboard with interactive charts

@@ -5,6 +5,7 @@ import math
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from .db import get_connection
 
@@ -122,19 +123,20 @@ def detect_anomalies(zscore_threshold: float = 2.5) -> dict[str, Any]:
     if not rows:
         return {"count": 0, "threshold": zscore_threshold, "rows": []}
 
-    magnitudes = np.array([float(row["magnitude"]) for row in rows], dtype=float)
-    mean_mag = float(np.mean(magnitudes))
-    std_mag = float(np.std(magnitudes))
-    if std_mag == 0:
+    frame = pd.DataFrame([dict(row) for row in rows])
+    frame["magnitude"] = pd.to_numeric(frame["magnitude"], errors="coerce")
+    frame = frame.dropna(subset=["magnitude"]).copy()
+    if frame.empty:
         return {"count": 0, "threshold": zscore_threshold, "rows": []}
 
+    frame["zscore"] = (frame["magnitude"] - frame["magnitude"].mean()) / frame["magnitude"].std(ddof=0)
+    frame["zscore"] = frame["zscore"].abs()
+    frame = frame[frame["zscore"] >= zscore_threshold].copy()
+
     anomalies: list[dict[str, Any]] = []
-    for row, mag in zip(rows, magnitudes):
-        zscore = abs((float(mag) - mean_mag) / std_mag)
-        if zscore >= zscore_threshold:
-            record = dict(row)
-            record["zscore"] = round(float(zscore), 3)
-            anomalies.append(record)
+    for record in frame.to_dict(orient="records"):
+        record["zscore"] = round(float(record["zscore"]), 3)
+        anomalies.append(record)
 
     return {"count": len(anomalies), "threshold": zscore_threshold, "rows": anomalies}
 
@@ -148,10 +150,13 @@ def predictive_earthquake_model(days_ahead: int = 7) -> dict[str, Any]:
             "SELECT event_date, magnitude FROM earthquakes ORDER BY event_date;"
         ).fetchall()
 
-    daily_counts: dict[dt.date, int] = {}
-    for row in rows:
-        date_obj = dt.datetime.strptime(row["event_date"], "%m/%d/%Y").date()
-        daily_counts[date_obj] = daily_counts.get(date_obj, 0) + 1
+    frame = pd.DataFrame([dict(row) for row in rows])
+    if frame.empty:
+        return {"days_ahead": days_ahead, "predictions": []}
+    frame["event_date"] = pd.to_datetime(frame["event_date"], format="%m/%d/%Y", errors="coerce")
+    frame = frame.dropna(subset=["event_date"])
+    daily_series = frame.groupby(frame["event_date"].dt.date).size().sort_index()
+    daily_counts = daily_series.to_dict()
 
     if len(daily_counts) < 2:
         return {"days_ahead": days_ahead, "predictions": []}
