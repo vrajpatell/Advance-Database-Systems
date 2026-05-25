@@ -42,9 +42,19 @@ def find_in_range(
 
 
 def find_within_distance(latitude: float, longitude: float, distance_km: float) -> dict[str, Any]:
+    lat_delta = distance_km / 111.0
+    lon_scale = max(0.1, math.cos(math.radians(latitude)))
+    lon_delta = distance_km / (111.0 * lon_scale)
+
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT event_date, event_time, latitude, longitude, magnitude, place FROM earthquakes;"
+            """
+            SELECT event_date, event_time, latitude, longitude, magnitude, place
+            FROM earthquakes
+            WHERE latitude BETWEEN ? AND ?
+              AND longitude BETWEEN ? AND ?;
+            """,
+            (latitude - lat_delta, latitude + lat_delta, longitude - lon_delta, longitude + lon_delta),
         ).fetchall()
 
     results: list[dict[str, Any]] = []
@@ -84,25 +94,47 @@ def clustering(lat1: float, lon1: float, lat2: float, lon2: float, step: float) 
     if step <= 0:
         raise ValueError("step must be positive")
 
+    min_lat, max_lat = sorted((lat2, lat1))
+    min_lon, max_lon = sorted((lon1, lon2))
+
     with get_connection() as conn:
-        rows = conn.execute("SELECT latitude, longitude FROM earthquakes;").fetchall()
+        rows = conn.execute(
+            """
+            SELECT latitude, longitude
+            FROM earthquakes
+            WHERE latitude BETWEEN ? AND ?
+              AND longitude BETWEEN ? AND ?;
+            """,
+            (min_lat, max_lat, min_lon, max_lon),
+        ).fetchall()
+
+    # Pre-bin points to grid cells so counting is O(n_points + n_cells) instead of O(n_points * n_cells).
+    binned_counts: dict[tuple[float, float], int] = {}
+    for row in rows:
+        lat_idx = math.floor((lat1 - row["latitude"]) / step)
+        lon_idx = math.floor((row["longitude"] - lon1) / step)
+        cell_lat = lat1 - lat_idx * step
+        cell_lon = lon1 + lon_idx * step
+        if cell_lat < lat2 or cell_lat > lat1 or cell_lon < lon1 or cell_lon > lon2:
+            continue
+        key = (round(cell_lat, 6), round(cell_lon, 6))
+        binned_counts[key] = binned_counts.get(key, 0) + 1
 
     cells: list[dict[str, Any]] = []
-    current_lat = lat1
-    while current_lat >= lat2:
-        current_lon = lon1
-        while current_lon <= lon2:
-            next_lat = current_lat - step
-            next_lon = current_lon + step
-            count = sum(
-                1
-                for row in rows
-                if next_lat <= row["latitude"] <= current_lat
-                and current_lon <= row["longitude"] <= next_lon
+    lat_steps = int(math.floor((lat1 - lat2) / step)) + 1
+    lon_steps = int(math.floor((lon2 - lon1) / step)) + 1
+
+    for lat_i in range(lat_steps):
+        current_lat = round(lat1 - lat_i * step, 6)
+        for lon_i in range(lon_steps):
+            current_lon = round(lon1 + lon_i * step, 6)
+            cells.append(
+                {
+                    "lat": current_lat,
+                    "lon": current_lon,
+                    "count": binned_counts.get((current_lat, current_lon), 0),
+                }
             )
-            cells.append({"lat": current_lat, "lon": current_lon, "count": count})
-            current_lon += step
-        current_lat -= step
 
     return {"cells": cells, "total_cells": len(cells)}
 
@@ -166,24 +198,26 @@ def predictive_earthquake_model(days_ahead: int = 7) -> dict[str, Any]:
     x = np.array([(d - day0).days for d, _ in sorted_days], dtype=float).reshape(-1, 1)
     y = np.array([count for _, count in sorted_days], dtype=float)
 
-    slope, intercept = np.polyfit(x.flatten(), y, 1)
+    coeffs = np.linalg.lstsq(np.hstack([x, np.ones((len(x), 1))]), y, rcond=None)[0]
+    slope, intercept = float(coeffs[0]), float(coeffs[1])
 
     last_day = sorted_days[-1][0]
-    predictions: list[dict[str, Any]] = []
-    for offset in range(1, days_ahead + 1):
-        future_day = last_day + dt.timedelta(days=offset)
-        future_x = np.array([[(future_day - day0).days]], dtype=float)
-        predicted_count = max(0.0, float(slope * future_x[0][0] + intercept))
-        predictions.append(
-            {
-                "date": future_day.isoformat(),
-                "predicted_earthquakes": round(predicted_count, 3),
-            }
-        )
+    future_offsets = np.arange(1, days_ahead + 1, dtype=float)
+    future_days = [last_day + dt.timedelta(days=int(offset)) for offset in future_offsets]
+    future_x = np.array([(day - day0).days for day in future_days], dtype=float)
+    future_preds = np.maximum(0.0, slope * future_x + intercept)
+
+    predictions: list[dict[str, Any]] = [
+        {
+            "date": day.isoformat(),
+            "predicted_earthquakes": round(float(pred), 3),
+        }
+        for day, pred in zip(future_days, future_preds)
+    ]
 
     return {
         "days_ahead": days_ahead,
-        "model": "NumPyLinearRegression",
+        "model": "NumPyLeastSquaresLinearRegression",
         "predictions": predictions,
     }
 
@@ -247,28 +281,29 @@ def _dbscan_labels(coords: np.ndarray, eps: float, min_samples: int) -> np.ndarr
     visited = np.zeros(n_points, dtype=bool)
     cluster_id = 0
 
-    def region_query(i: int) -> list[int]:
-        dists = np.linalg.norm(coords - coords[i], axis=1)
-        return [idx for idx, d in enumerate(dists) if d <= eps]
+    # Build a neighborhood index once using vectorized pairwise distances.
+    diff = coords[:, None, :] - coords[None, :, :]
+    dist_matrix = np.sqrt(np.sum(diff * diff, axis=2))
+    neighbors = [np.flatnonzero(dist_matrix[i] <= eps).tolist() for i in range(n_points)]
 
     for i in range(n_points):
         if visited[i]:
             continue
         visited[i] = True
-        neighbors = region_query(i)
-        if len(neighbors) < min_samples:
+        point_neighbors = neighbors[i]
+        if len(point_neighbors) < min_samples:
             labels[i] = -1
             continue
 
         labels[i] = cluster_id
-        seeds = set(neighbors)
+        seeds = set(point_neighbors)
         seeds.discard(i)
 
         while seeds:
             j = seeds.pop()
             if not visited[j]:
                 visited[j] = True
-                j_neighbors = region_query(j)
+                j_neighbors = neighbors[j]
                 if len(j_neighbors) >= min_samples:
                     seeds.update(j_neighbors)
             if labels[j] in (-99, -1):
