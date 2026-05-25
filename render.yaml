@@ -23,3 +23,5 @@ services:
     envVars:
       - key: DATABASE_PATH
         value: /tmp/advance-db/earthquakes.db
+      - key: API_BASE_URL
+        value: https://advance-db-api.onrender.com
