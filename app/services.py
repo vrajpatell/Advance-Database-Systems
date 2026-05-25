@@ -281,8 +281,14 @@ def _dbscan_labels(coords: np.ndarray, eps: float, min_samples: int) -> np.ndarr
     visited = np.zeros(n_points, dtype=bool)
     cluster_id = 0
 
-    # Avoid allocating a full O(n^2) distance matrix, which can exhaust memory
-    # in production (e.g., >10k points). Compute neighborhoods on demand and cache.
+    # Spatial hash grid: each point is stored in a cell sized by eps so neighborhood
+    # queries inspect only nearby cells instead of all points.
+    cell_size = eps
+    grid: dict[tuple[int, int], list[int]] = {}
+    for idx, (lat, lon) in enumerate(coords):
+        key = (int(math.floor(lat / cell_size)), int(math.floor(lon / cell_size)))
+        grid.setdefault(key, []).append(idx)
+
     neighbors_cache: dict[int, list[int]] = {}
 
     def neighbors_for(i: int) -> list[int]:
@@ -290,9 +296,21 @@ def _dbscan_labels(coords: np.ndarray, eps: float, min_samples: int) -> np.ndarr
         if cached is not None:
             return cached
 
-        delta = coords - coords[i]
+        lat, lon = coords[i]
+        cell = (int(math.floor(lat / cell_size)), int(math.floor(lon / cell_size)))
+        candidates: list[int] = []
+        for d_lat in (-1, 0, 1):
+            for d_lon in (-1, 0, 1):
+                candidates.extend(grid.get((cell[0] + d_lat, cell[1] + d_lon), []))
+
+        if not candidates:
+            neighbors_cache[i] = []
+            return []
+
+        candidate_coords = coords[candidates]
+        delta = candidate_coords - coords[i]
         distances = np.sqrt(np.sum(delta * delta, axis=1))
-        points = np.flatnonzero(distances <= eps).tolist()
+        points = [candidates[k] for k in np.flatnonzero(distances <= eps)]
         neighbors_cache[i] = points
         return points
 

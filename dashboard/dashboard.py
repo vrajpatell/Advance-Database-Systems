@@ -15,11 +15,12 @@ import streamlit as st
 DB_PATH = Path(os.getenv("DATABASE_PATH", "data/earthquakes.db"))
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:5000").rstrip("/")
 DEFAULT_TIMEOUT = 20
+ML_ENDPOINT_TIMEOUT = 60
 
 
 @st.cache_data(ttl=120)
-def _post(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
-    response = requests.post(f"{API_BASE_URL}{endpoint}", json=payload, timeout=DEFAULT_TIMEOUT)
+def _post(endpoint: str, payload: dict[str, Any], timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
+    response = requests.post(f"{API_BASE_URL}{endpoint}", json=payload, timeout=timeout)
     response.raise_for_status()
     return response.json() if response.content else {}
 
@@ -109,7 +110,7 @@ def main() -> None:
         ),
         "anomaly": lambda: _post("/analytics/anomaly-detection", {"zscore_threshold": zscore_threshold}),
         "predictive": lambda: _post("/analytics/predictive-earthquake", {"days_ahead": days_ahead}),
-        "ml": lambda: _post("/analytics/ml-clustering", {"eps": eps, "min_samples": min_samples}),
+        "ml": lambda: _post("/analytics/ml-clustering", {"eps": eps, "min_samples": min_samples}, timeout=ML_ENDPOINT_TIMEOUT),
     }
 
     responses: dict[str, dict[str, Any]] = {}
@@ -126,7 +127,11 @@ def main() -> None:
                 responses[name] = payload or {}
 
     if failures:
-        st.warning(f"Some API calls failed ({len(failures)}/{len(requests_map)}). Showing partial results.")
+        failed_names = ", ".join(sorted(failures.keys()))
+        st.warning(
+            f"Some API calls failed ({len(failures)}/{len(requests_map)}): {failed_names}. "
+            "Showing partial results. Open Monitoring logs for error details."
+        )
 
     with st.expander("Monitoring logs (lightweight)"):
         diagnostic_rows = []
